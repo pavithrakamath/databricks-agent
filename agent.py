@@ -80,7 +80,8 @@ def _sanitize_search_term(term: str) -> str:
         Sanitized search term
     """
     # Remove SQL injection characters: quotes, semicolons, comments
-    term = re.sub(r"[';--]", "", term)
+    # Escape dash to avoid FutureWarning about set difference
+    term = re.sub(r"[';]|--", "", term)
     # Remove any remaining non-alphanumeric except spaces and hyphens
     term = re.sub(r"[^a-zA-Z0-9\s-]", "", term)
     return term.strip()
@@ -319,6 +320,7 @@ def search_tables_by_description(
     schema_filter = f"AND table_schema = '{tb_schema}'" if tb_schema else ""
     
     # Use DatabricksSession to avoid warnings in Databricks notebooks
+    # The warning suggests using DatabricksSession.builder.getOrCreate() with no parameters
     try:
         from databricks.connect import DatabricksSession
         spark = DatabricksSession.builder.getOrCreate()
