@@ -1,0 +1,18 @@
+# This project uses Poetry for dependency management.
+# To export requirements from Poetry, run: poetry export -f requirements.txt --output requirements.txt
+# Or install dependencies using Poetry: poetry install
+
+# Core dependencies (for reference - managed by Poetry)
+databricks-agents>=0.1.0
+databricks-langchain>=0.1.0
+langchain>=1.0.0
+langchain-core>=1.0.0
+langgraph>=0.1.0
+mlflow-skinny[databricks]>=2.0.0
+
+# Development dependencies (optional - managed by Poetry)
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# ruff>=0.1.0
+# mypy>=1.0.0

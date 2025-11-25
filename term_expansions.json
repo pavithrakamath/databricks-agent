@@ -1,0 +1,18 @@
+{
+  "geo": ["geo", "geographic", "geolocation", "location", "lat", "lng", "longitude", "latitude", "coord", "position"],
+  "location": ["location", "loc", "geo", "geographic", "geolocation", "lat", "lng", "longitude", "latitude", "coord", "position", "address"],
+  "geolocation": ["geo", "geographic", "geolocation", "location", "lat", "lng", "longitude", "latitude", "coord", "position"],
+  "customer": ["customer", "cust", "client", "user", "account"],
+  "date": ["date", "time", "timestamp", "datetime", "created", "updated", "modified"],
+  "time": ["time", "date", "timestamp", "datetime", "created", "updated", "modified"],
+  "timestamp": ["timestamp", "time", "date", "datetime", "created", "updated", "modified"],
+  "id": ["id", "identifier", "key", "pk"],
+  "name": ["name", "title", "label"],
+  "email": ["email", "mail", "e-mail"],
+  "phone": ["phone", "telephone", "tel", "mobile"],
+  "address": ["address", "addr", "street", "city", "zip", "postal"],
+  "fares": ["fares", "fare", "price", "pricing", "cost", "charge", "charges", "amount", "fee", "fees", "payment", "payments", "revenue", "income"],
+  "price": ["price", "pricing", "cost", "fare", "fares", "charge", "charges", "amount", "fee", "fees", "payment", "payments"],
+  "cost": ["cost", "price", "pricing", "fare", "fares", "charge", "charges", "amount", "fee", "fees", "expense", "expenses"],
+  "payment": ["payment", "payments", "pay", "price", "cost", "fare", "fares", "charge", "charges", "amount", "fee", "fees"]
+}
