@@ -1,6 +1,11 @@
-# Databricks LangGraph Agent
+# LangGraph Agent with Human-in-the-Loop
 
-A Databricks LangGraph agent built with LangChain components and MLflow integration, featuring tool calling capabilities for data science tasks.
+A flexible LangGraph agent built with LangChain components, featuring:
+- **Multi-provider LLM support** (Databricks, OpenAI, Azure OpenAI, Anthropic, Ollama)
+- **Human-in-the-loop middleware** for tool approval and answer verification
+- **MLflow integration** for deployment (optional)
+- **Modular architecture** for easy maintenance and extension
+- **Environment-agnostic** - runs in Databricks or standalone mode
 
 ## Setup
 
@@ -26,16 +31,52 @@ poetry run python agent.py
 
 ## Dependencies
 
-- `databricks-agents` - Databricks Agents framework
-- `databricks-langchain` - Databricks LangChain integration
+**Core:**
 - `langchain` - LangChain framework (v1.0.0+)
 - `langchain-core` - LangChain core (v1.0.0+)
-- `langgraph` - LangGraph for agent workflows (uses StateGraph for agent orchestration)
-- `mlflow-skinny[databricks]` - MLflow with Databricks extras (uses ResponsesAgent framework)
+- `langgraph` - LangGraph for agent workflows
+- `python-dotenv` - Environment variable management
 
-## Usage
+**Optional (provider-specific):**
+- `databricks-langchain` - For Databricks provider
+- `langchain-openai` - For OpenAI/Azure OpenAI providers
+- `langchain-anthropic` - For Anthropic provider
+- `langchain-community` - For Ollama provider
+- `mlflow-skinny[databricks]` - For MLflow integration (optional)
 
-See `agent.py` for the main agent implementation.
+## Quick Start
+
+### Configuration
+
+The agent supports configuration via environment variables or a `.env` file:
+
+```bash
+# .env file
+LLM_PROVIDER=azure_openai
+LLM_ENDPOINT_NAME=gpt-4-deployment
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your-api-key
+AGENT_EXECUTION_MODE=standalone
+```
+
+### Basic Usage
+
+```python
+from agent import agent
+
+config = {"configurable": {"thread_id": "1"}}
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "List all schemas"}]
+}, config)
+```
+
+### Human-in-the-Loop
+
+The agent includes built-in human-in-the-loop middleware:
+- **SQL queries** require approval before execution (configurable)
+- **Final answers** can be verified before sending to users
+
+See [`USAGE.md`](USAGE.md) for detailed usage instructions and [`AZURE_OPENAI_SETUP.md`](AZURE_OPENAI_SETUP.md) for Azure OpenAI configuration.
 
 ## Architecture Decisions
 
