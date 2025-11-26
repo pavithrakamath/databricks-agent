@@ -163,30 +163,59 @@ def list_tables(catalog: str = "samples", schema: str = "bakehouse") -> str:
 def find_tables_with_column(
     column_name_partial: str,
     catalog: str = "samples",
-    tb_schema: str = "bakehouse"
+    tb_schema: str = "bakehouse",
+    expansion_config_path: Optional[str] = None
 ) -> str:
-    """Find tables with columns matching the partial column name."""
+    """
+    Find tables with columns matching the partial column name.
+    
+    Intelligently expands column name into multiple related search terms
+    (e.g., "customer" -> "customer_id", "cust_id", "cust_no", etc.).
+    """
     catalog = sanitize_identifier(catalog)
     tb_schema = sanitize_identifier(tb_schema)
-    column_name_partial = sanitize_search_term(column_name_partial)
     
     if not column_name_partial:
         return json.dumps([])
     
+    # Load term expansions
+    try:
+        term_expansions = load_term_expansions(expansion_config_path)
+    except (ValueError, IOError):
+        term_expansions = {}
+    
+    # Expand search terms to handle variations (e.g., "customer" -> "customer_id", "cust_id")
+    search_terms = expand_search_terms(column_name_partial, term_expansions)
+    if not search_terms:
+        # Fallback to original term if expansion fails
+        search_terms = [sanitize_search_term(column_name_partial)]
+    
+    # Build SQL query with OR conditions for all expanded terms
+    max_terms_in_query = 30
+    terms_to_use = search_terms[:max_terms_in_query]
+    escaped_terms = [term.replace("'", "''") for term in terms_to_use]
+    like_conditions = " OR ".join([
+        f"column_name LIKE '%{term}%'" for term in escaped_terms
+    ])
+    
     query = f"""
-    SELECT table_name, column_name
+    SELECT DISTINCT table_name, column_name
     FROM {catalog}.information_schema.columns
     WHERE table_schema = '{tb_schema}'
-      AND column_name LIKE '%{column_name_partial}%'
+      AND ({like_conditions})
+    ORDER BY table_name, column_name
     """
     
     spark = get_spark_session()
-    df = spark.sql(query)
-    result = [
-        {"table_name": row.table_name, "column_name": row.column_name}
-        for row in df.collect()
-    ]
-    return json.dumps(result)
+    try:
+        df = spark.sql(query)
+        result = [
+            {"table_name": row.table_name, "column_name": row.column_name}
+            for row in df.collect()
+        ]
+        return json.dumps(result)
+    except Exception as e:
+        return json.dumps({"error": str(e), "type": type(e).__name__})
 
 
 def search_tables_by_description(

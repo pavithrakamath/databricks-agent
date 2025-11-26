@@ -234,3 +234,208 @@ def approve_final_answer(
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+
+def is_exit_message(message: str) -> bool:
+    """
+    Check if a user message indicates they want to end the session.
+    
+    Args:
+        message: User message content
+    
+    Returns:
+        True if message indicates exit/goodbye, False otherwise
+    """
+    if not message or not isinstance(message, str):
+        return False
+    
+    message_lower = message.lower().strip()
+    
+    # Common exit/goodbye phrases
+    exit_phrases = [
+        "exit", "bye", "goodbye", "see you", "farewell",
+        "quit", "end session", "close session", "done",
+        "thanks bye", "thank you bye", "thanks goodbye",
+        "thank you goodbye", "that's all", "that's it",
+        "no more questions", "i'm done", "i'm finished"
+    ]
+    
+    # Check if message matches any exit phrase (exact or contains)
+    for phrase in exit_phrases:
+        if message_lower == phrase or message_lower.startswith(phrase + " ") or message_lower.endswith(" " + phrase):
+            return True
+    
+    # Check for patterns like "bye!" or "exit now"
+    if any(phrase in message_lower for phrase in ["bye", "exit", "quit"]) and len(message_lower.split()) <= 3:
+        return True
+    
+    return False
+
+
+def clear_session(agent: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Clear/delete the session state for a specific thread_id.
+    
+    This removes all stored messages and state for the given thread_id,
+    effectively starting a fresh session.
+    
+    Args:
+        agent: The LangGraph agent instance
+        config: Configuration dict with thread_id: {"configurable": {"thread_id": "..."}}
+    
+    Returns:
+        dict with status indicating success or error
+    """
+    try:
+        thread_id = config.get("configurable", {}).get("thread_id")
+        if not thread_id:
+            return {"error": "thread_id not found in config", "status": "error"}
+        
+        # Get the checkpointer from the agent
+        # For compiled LangGraph agents, checkpointer is stored on the agent
+        checkpointer = None
+        if hasattr(agent, "checkpointer"):
+            checkpointer = agent.checkpointer
+        elif hasattr(agent, "graph") and hasattr(agent.graph, "checkpointer"):
+            checkpointer = agent.graph.checkpointer
+        
+        # Debug: Print checkpointer info to help diagnose
+        # print(f"DEBUG: checkpointer={checkpointer}, has_storage={hasattr(checkpointer, '_storage') if checkpointer else False}")
+        
+        # Method 1: Direct storage deletion (most reliable - actually deletes the checkpoint)
+        if checkpointer is not None:
+            try:
+                # MemorySaver stores checkpoints in _storage dict (private attribute)
+                # Try to access it using getattr to handle private attributes
+                storage = getattr(checkpointer, "_storage", None)
+                if storage is not None and isinstance(storage, dict):
+                    if thread_id in storage:
+                        del storage[thread_id]
+                        return {"status": "cleared", "thread_id": thread_id, "method": "_storage"}
+                
+                # Some versions might use 'storage' (public attribute)
+                storage = getattr(checkpointer, "storage", None)
+                if storage is not None and isinstance(storage, dict):
+                    if thread_id in storage:
+                        del storage[thread_id]
+                        return {"status": "cleared", "thread_id": thread_id, "method": "storage"}
+            except Exception as e:
+                pass
+        
+        # Method 2: Use update_state to clear messages, then delete checkpoint
+        try:
+            if hasattr(agent, "update_state"):
+                agent.update_state(config, {"values": {"messages": []}})
+                # Also clear custom fields
+                agent.update_state(config, {"values": {"custom_inputs": None, "custom_outputs": None}})
+                
+                # After update_state, try to delete the checkpoint entry
+                if checkpointer is not None:
+                    try:
+                        if hasattr(checkpointer, "_storage") and thread_id in checkpointer._storage:
+                            del checkpointer._storage[thread_id]
+                        elif hasattr(checkpointer, "storage") and thread_id in checkpointer.storage:
+                            del checkpointer.storage[thread_id]
+                    except Exception:
+                        pass
+                
+                return {"status": "cleared", "thread_id": thread_id, "method": "update_state"}
+        except Exception as e:
+            pass
+        
+        # Method 3: Try using put with empty checkpoint, then delete
+        if checkpointer is not None:
+            try:
+                from langgraph.checkpoint.base import Checkpoint
+                empty_checkpoint = Checkpoint(v={}, metadata={}, channel_values={}, channel_versions={}, versions_seen={})
+                checkpointer.put({"configurable": {"thread_id": thread_id}}, empty_checkpoint)
+                # Then delete it
+                if hasattr(checkpointer, "_storage") and thread_id in checkpointer._storage:
+                    del checkpointer._storage[thread_id]
+                elif hasattr(checkpointer, "storage") and thread_id in checkpointer.storage:
+                    del checkpointer.storage[thread_id]
+                return {"status": "cleared", "thread_id": thread_id, "method": "put_and_delete"}
+            except Exception:
+                pass
+        
+        return {"error": "Could not clear session - all methods failed", "status": "error"}
+    
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def list_active_sessions(agent: Any) -> dict[str, Any]:
+    """
+    List all active session thread_ids stored in the checkpointer.
+    
+    Args:
+        agent: The LangGraph agent instance
+    
+    Returns:
+        dict with list of active thread_ids or error
+    """
+    try:
+        checkpointer = None
+        
+        # Try to get checkpointer from agent
+        if hasattr(agent, "checkpointer"):
+            checkpointer = agent.checkpointer
+        elif hasattr(agent, "graph") and hasattr(agent.graph, "checkpointer"):
+            checkpointer = agent.graph.checkpointer
+        
+        if checkpointer is None:
+            return {"error": "No checkpointer found", "status": "error"}
+        
+        # Get all thread_ids from storage
+        if hasattr(checkpointer, "storage"):
+            thread_ids = list(checkpointer.storage.keys())
+            return {"status": "success", "thread_ids": thread_ids, "count": len(thread_ids)}
+        elif hasattr(checkpointer, "_storage"):
+            thread_ids = list(checkpointer._storage.keys())
+            return {"status": "success", "thread_ids": thread_ids, "count": len(thread_ids)}
+        else:
+            return {"error": "Cannot list sessions - checkpointer structure unknown", "status": "error"}
+    
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def clear_all_sessions(agent: Any) -> dict[str, Any]:
+    """
+    Clear all session states from the checkpointer.
+    
+    WARNING: This will delete ALL conversation history for ALL sessions.
+    Use with caution!
+    
+    Args:
+        agent: The LangGraph agent instance
+    
+    Returns:
+        dict with status indicating success or error
+    """
+    try:
+        checkpointer = None
+        
+        # Try to get checkpointer from agent
+        if hasattr(agent, "checkpointer"):
+            checkpointer = agent.checkpointer
+        elif hasattr(agent, "graph") and hasattr(agent.graph, "checkpointer"):
+            checkpointer = agent.graph.checkpointer
+        
+        if checkpointer is None:
+            return {"error": "No checkpointer found", "status": "error"}
+        
+        # Clear all storage
+        if hasattr(checkpointer, "storage"):
+            count = len(checkpointer.storage)
+            checkpointer.storage.clear()
+            return {"status": "cleared_all", "sessions_cleared": count}
+        elif hasattr(checkpointer, "_storage"):
+            count = len(checkpointer._storage)
+            checkpointer._storage.clear()
+            return {"status": "cleared_all", "sessions_cleared": count}
+        else:
+            return {"error": "Cannot clear sessions - checkpointer structure unknown", "status": "error"}
+    
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+

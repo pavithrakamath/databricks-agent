@@ -10,7 +10,7 @@ Main agent module that orchestrates the LangGraph workflow with:
 
 from typing import Annotated, Any, Generator, Optional, Sequence, TypedDict, Union
 
-from langchain.messages import AIMessage, AIMessageChunk, AnyMessage
+from langchain.messages import AIMessage, AIMessageChunk, AnyMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
@@ -30,7 +30,7 @@ from config import (
     SYSTEM_PROMPT,
 )
 from llm_provider import create_llm
-from middleware import get_tools_requiring_approval
+from middleware import get_tools_requiring_approval, is_exit_message, clear_session
 from tools import get_all_tools
 
 # Optional MLflow imports (only if available)
@@ -109,15 +109,16 @@ def create_tool_calling_agent(
     )
     
     # Configure interrupts
-    if tools_requiring_approval and checkpointer is not None:
-        if interrupt_before is None:
-            interrupt_before = ["tools"]
+    # Note: interrupt_before tools is disabled to allow automatic tool execution
+    # Tool-specific approval can be handled within the tool execution logic if needed
+    # For now, we allow all tools to execute automatically without interruption
+    # if tools_requiring_approval and checkpointer is not None:
+    #     if interrupt_before is None:
+    #         interrupt_before = ["tools"]
     
-    if verify_final_answer and checkpointer is not None:
-        if interrupt_after is None:
-            interrupt_after = ["agent"]
-        elif "agent" not in interrupt_after:
-            interrupt_after = interrupt_after + ["agent"]
+    # Initialize interrupt_before if not provided (but don't add tools to it)
+    if interrupt_before is None:
+        interrupt_before = []
     
     model = model.bind_tools(tools)
 
@@ -129,16 +130,62 @@ def create_tool_calling_agent(
             return "continue"
         return "end"
 
+    def filter_incomplete_tool_calls(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
+        """
+        Filter out AIMessages with tool_calls that don't have corresponding ToolMessages.
+        This prevents Azure OpenAI errors when stale state contains incomplete tool calls.
+        """
+        filtered = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            
+            # If this is an AIMessage with tool_calls, check if all tool calls are responded to
+            if isinstance(msg, AIMessage) and msg.tool_calls:
+                tool_call_ids = {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
+                
+                # Look ahead to find ToolMessages responding to these tool calls
+                j = i + 1
+                found_tool_call_ids = set()
+                while j < len(messages):
+                    next_msg = messages[j]
+                    if isinstance(next_msg, ToolMessage):
+                        # ToolMessage has tool_call_id attribute
+                        tool_call_id = getattr(next_msg, "tool_call_id", None)
+                        if tool_call_id:
+                            found_tool_call_ids.add(tool_call_id)
+                    elif isinstance(next_msg, AIMessage):
+                        # Stop at next AIMessage (new turn)
+                        break
+                    j += 1
+                
+                # If not all tool calls are responded to, create AIMessage without tool_calls
+                if tool_call_ids and not tool_call_ids.issubset(found_tool_call_ids):
+                    # Create a new AIMessage without tool_calls to avoid Azure OpenAI error
+                    filtered.append(AIMessage(content=msg.content or ""))
+                else:
+                    # All tool calls have responses, include the original message
+                    filtered.append(msg)
+            else:
+                # Not an AIMessage with tool_calls, include as-is
+                filtered.append(msg)
+            
+            i += 1
+        
+        return filtered
+
     if system_prompt:
         preprocessor = RunnableLambda(
-            lambda state: [{"role": "system", "content": system_prompt}] + state["messages"]
+            lambda state: [SystemMessage(content=system_prompt)] + filter_incomplete_tool_calls(state["messages"])
         )
     else:
-        preprocessor = RunnableLambda(lambda state: state["messages"])
+        preprocessor = RunnableLambda(lambda state: filter_incomplete_tool_calls(state["messages"]))
     model_runnable = preprocessor | model
 
     def call_model(state: AgentState, config: RunnableConfig):
         """Call the language model."""
+        # Exit handling is done in invoke_with_exit_handling wrapper
+        # Just call the model normally here
         response = model_runnable.invoke(state, config)
         return {"messages": [response]}
 
@@ -160,15 +207,98 @@ def create_tool_calling_agent(
         compile_kwargs["checkpointer"] = checkpointer
     if interrupt_before:
         compile_kwargs["interrupt_before"] = interrupt_before
+    
+    # For verify_final_answer: Don't interrupt after agent when tool calls are present
+    # This allows tools to execute automatically. Only interrupt for final answers.
+    # Since LangGraph's interrupt_after doesn't support conditionals, we remove "agent"
+    # from interrupt_after to allow automatic tool execution.
+    if verify_final_answer and checkpointer is not None:
+        if interrupt_after is None:
+            interrupt_after = []
+        elif isinstance(interrupt_after, list) and "agent" in interrupt_after:
+            # Remove "agent" from interrupt_after to allow tools to execute automatically
+            interrupt_after = [node for node in interrupt_after if node != "agent"]
+        elif isinstance(interrupt_after, dict) and "agent" in interrupt_after:
+            del interrupt_after["agent"]
+    
     if interrupt_after:
         compile_kwargs["interrupt_after"] = interrupt_after
 
     compiled_agent = workflow.compile(**compile_kwargs)
     
-    # Store metadata
+    # Store metadata and checkpointer reference for session management
     compiled_agent.middleware_config = middleware_config
     compiled_agent.tools_requiring_approval = tools_requiring_approval
     compiled_agent.verify_final_answer = verify_final_answer
+    if checkpointer is not None:
+        compiled_agent.checkpointer = checkpointer  # Store reference for easy access
+    
+    # Wrap the invoke method to handle exit messages and clear sessions
+    original_invoke = compiled_agent.invoke
+    
+    def invoke_with_exit_handling(input_data, config=None, **kwargs):
+        """Wrapper that clears session if user says exit/goodbye."""
+        # Check if the last user message is an exit message BEFORE invoking
+        messages = input_data.get("messages", []) if isinstance(input_data, dict) else []
+        is_exit = False
+        
+        if messages and config:
+            last_user_msg = None
+            for msg in reversed(messages):
+                if isinstance(msg, dict):
+                    msg_role = msg.get("role", msg.get("type", ""))
+                    msg_content = msg.get("content", "")
+                    if msg_role in ("user", "human") and msg_content:
+                        last_user_msg = msg_content
+                        break
+                elif hasattr(msg, "content"):
+                    msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)
+                    if msg_type in ("human", "user"):
+                        last_user_msg = getattr(msg, "content", None) or str(msg)
+                        break
+            
+            # If exit message detected, mark it
+            if last_user_msg and is_exit_message(last_user_msg):
+                is_exit = True
+        
+        # Normal flow: invoke the agent
+        result = original_invoke(input_data, config, **kwargs)
+        
+        # If this was an exit message, clear the session AFTER invoke
+        # This ensures we delete all state including the exit message and goodbye
+        if is_exit and config:
+            try:
+                # Clear session - try multiple times to ensure it works
+                clear_result = clear_session(compiled_agent, config)
+                
+                # Verify clearing worked by checking if state still exists
+                try:
+                    state = compiled_agent.get_state(config)
+                    if state.values.get("messages"):
+                        # Still has messages, try direct deletion
+                        checkpointer = getattr(compiled_agent, "checkpointer", None)
+                        if checkpointer:
+                            thread_id = config.get("configurable", {}).get("thread_id")
+                            storage = getattr(checkpointer, "_storage", None)
+                            if storage and isinstance(storage, dict) and thread_id in storage:
+                                del storage[thread_id]
+                except Exception:
+                    pass
+            except Exception as e:
+                # If clearing fails, try direct access as last resort
+                try:
+                    checkpointer = getattr(compiled_agent, "checkpointer", None)
+                    if checkpointer:
+                        thread_id = config.get("configurable", {}).get("thread_id")
+                        storage = getattr(checkpointer, "_storage", None)
+                        if storage and isinstance(storage, dict) and thread_id in storage:
+                            del storage[thread_id]
+                except Exception:
+                    pass
+        
+        return result
+    
+    compiled_agent.invoke = invoke_with_exit_handling
     
     return compiled_agent
 
@@ -255,15 +385,15 @@ tools = get_all_tools()
 # Create checkpointer for state persistence (required for interrupts)
 checkpointer = MemorySaver()
 
-# Create agent with human-in-the-loop enabled:
-# 1. SQL queries require approval before execution (configured in MIDDLEWARE_CONFIG)
-# 2. Final answers require verification before sending to user
+# Create agent with automatic tool execution
+# Note: verify_final_answer is set to False to allow automatic tool execution
+# Tool-specific approval can still be handled via MIDDLEWARE_CONFIG if needed
 agent = create_tool_calling_agent(
     llm, 
     tools, 
     SYSTEM_PROMPT,
     checkpointer=checkpointer,
-    verify_final_answer=True
+    verify_final_answer=False  # Disable to allow automatic tool execution
 )
 
 # Create MLflow agent wrapper (if MLflow is available)
